@@ -1,0 +1,11 @@
+CS401 - Applied AI
+
+SYNTHETIC DEMO — not official university information.
+
+Semester starts 2026-09-07.
+
+Model evaluation report: due 2026-10-28 at 17:00; weighting 30% of this module.
+
+AI prototype: due 2026-11-10 at 17:00; weighting 40% of this module.
+
+Final exam: due 2026-11-24 at 17:00; weighting 30% of this module.

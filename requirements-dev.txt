@@ -1,0 +1,5 @@
+-r requirements.lock
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.16.10
+reportlab==4.5.1

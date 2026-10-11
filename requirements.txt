@@ -1,0 +1,11 @@
+# Exact direct versions verified for this release. See requirements.lock for the full runtime lock.
+fastapi==0.143.0
+uvicorn==0.54.0
+openai==2.54.0
+pydantic==2.14.0
+pypdf==6.20.0
+httpx==0.28.1
+python-dotenv==1.2.4
+python-multipart==0.0.32
+icalendar==7.3.0
+tzdata==2026.5
