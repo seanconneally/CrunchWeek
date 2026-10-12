@@ -4,7 +4,7 @@ import csv
 import io
 from datetime import datetime, timedelta, timezone
 
-from icalendar import Calendar, Event
+from icalendar import Alarm, Calendar, Event
 
 from crunch_week.models import Plan, Project, local_datetime
 
@@ -28,6 +28,7 @@ def csv_export(project: Project) -> bytes:
             "Weight (%)",
             "Effort (h)",
             "Reviewed",
+            "Submitted",
             "Source",
             "Page",
             "Evidence",
@@ -48,6 +49,7 @@ def csv_export(project: Project) -> bytes:
                     item.weight_percent,
                     item.effort_minutes / 60,
                     item.reviewed,
+                    item.completed,
                     item.source_file,
                     item.source_page,
                     item.evidence,
@@ -65,7 +67,7 @@ def calendar_export(project: Project, plan: Plan) -> bytes:
     calendar.add("x-wr-calname", f"Crunch Week · {project.name}")
     stamp = datetime.now(timezone.utc)
     for item in project.assessments:
-        if not item.reviewed or not item.due_date:
+        if item.completed or not item.reviewed or not item.due_date:
             continue
         event = Event()
         event.add("uid", f"{project.id}-{item.id}@crunchweek.local")
@@ -84,6 +86,12 @@ def calendar_export(project: Project, plan: Plan) -> bytes:
             f"Weight: {item.weight_percent if item.weight_percent is not None else 'unknown'}% of {item.module}\n"
             f"Source: {item.source_file}, page {item.source_page or 'n/a'}\n{item.evidence}\n{item.notes}",
         )
+        if project.settings.deadline_reminder_days:
+            alarm = Alarm()
+            alarm.add("action", "DISPLAY")
+            alarm.add("description", f"Deadline approaching: {item.title}")
+            alarm.add("trigger", -timedelta(days=project.settings.deadline_reminder_days))
+            event.add_component(alarm)
         event.add("transp", "TRANSPARENT")
         calendar.add_component(event)
     for block in plan.blocks:
@@ -93,6 +101,12 @@ def calendar_export(project: Project, plan: Plan) -> bytes:
         event.add("summary", f"STUDY · {block.module} · {block.title}")
         event.add("dtstart", block.start.astimezone(timezone.utc))
         event.add("dtend", block.end.astimezone(timezone.utc))
-        event.add("description", "Suggested study block based on your remaining effort estimate. Adjust as needed.")
+        event.add("description", "Suggested study block based on your remaining effort estimate. Log progress in Crunch Week.")
+        if project.settings.reminder_minutes:
+            alarm = Alarm()
+            alarm.add("action", "DISPLAY")
+            alarm.add("description", f"Study session: {block.title}")
+            alarm.add("trigger", -timedelta(minutes=project.settings.reminder_minutes))
+            event.add_component(alarm)
         calendar.add_component(event)
     return calendar.to_ical()

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import threading
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -16,23 +18,40 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, field_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from crunch_week.ai_config import AIConfigurationError, ai_status, load_ai_config
+from crunch_week.ai_config import AIConfigurationError, ai_status, chat_status, load_ai_config, load_chat_config
+from crunch_week.app_help import local_help
+from crunch_week.assistant import (
+    AssistantError,
+    ChatMessage,
+    Interpretation,
+    Proposal,
+    apply_proposal,
+    build_proposal,
+    interpret,
+    review_proposal,
+)
+from crunch_week.chat_usage import ChatUsage, DailyChatBudget, DailyLimitError
 from crunch_week.demo import demo_project
 from crunch_week.documents import MAX_BYTES, DocumentError, read_document
+from crunch_week.estimates import check_in
 from crunch_week.exports import calendar_export, csv_export
 from crunch_week.extraction import ExtractionError, extract_document, merge_assessments
-from crunch_week.models import Model, Project, new_project
+from crunch_week.models import Model, Project, Settings, new_project
 from crunch_week.notion import NotionClient, NotionError
 from crunch_week.planner import build_plan, review_warnings, weekly_summary
+from crunch_week.progress import study_action
+from crunch_week.recovery import apply_recovery, recovery_options
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env", override=False)
 notion_lock = threading.Lock()
 extraction_lock = threading.Lock()
+assistant_lock = threading.Lock()
+chat_budget = DailyChatBudget(Path(os.environ.get("CRUNCH_WEEK_DATA_DIR", str(ROOT / ".local"))) / "chat_usage.sqlite3")
 
 
 class BodyLimitMiddleware:
@@ -118,6 +137,7 @@ def health():
 def config():
     return {
         **ai_status(),
+        **chat_status(),
         "notion_configured": bool(os.getenv("NOTION_TOKEN")),
         "max_file_mb": 10,
         "parent_configured": bool(os.getenv("NOTION_PARENT_PAGE_ID")),
@@ -141,8 +161,140 @@ def validate_project(project: Project):
 
 @app.post("/api/plan", dependencies=[Depends(browser_request)])
 def plan(project: Project):
-    result = build_plan(project, datetime.now(ZoneInfo(project.settings.timezone)))
-    return {"plan": result, "weeks": weekly_summary(project), "warnings": review_warnings(project)}
+    now = datetime.now(ZoneInfo(project.settings.timezone))
+    result = build_plan(project, now)
+    return {"plan": result, "planned_at": now, "weeks": weekly_summary(project, result, now), "warnings": review_warnings(project)}
+
+
+@app.post("/api/recovery", dependencies=[Depends(browser_request)])
+def recovery(project: Project):
+    return recovery_options(project, datetime.now(ZoneInfo(project.settings.timezone)))
+
+
+class RecoveryRequest(Model):
+    project: Project
+    option_id: Literal["buffer", "extra", "combined"]
+    expected_settings: Settings
+
+
+@app.post("/api/recovery/apply", dependencies=[Depends(browser_request)], response_model=Project)
+def recover(request: RecoveryRequest):
+    try:
+        updated = apply_recovery(request.project, request.option_id, datetime.now(ZoneInfo(request.project.settings.timezone)))
+        if updated.settings != request.expected_settings:
+            raise ValueError("Available time changed since this comparison. Compare again before applying.")
+        return updated
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class StudyActionRequest(Model):
+    project: Project
+    action: Literal["done", "skipped", "undo"]
+    block_id: UUID
+    planned_at: datetime
+
+    @field_validator("planned_at")
+    @classmethod
+    def aware_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("Planning time must include a timezone.")
+        return value
+
+
+@app.post("/api/study/action", dependencies=[Depends(browser_request)], response_model=Project)
+def update_study(request: StudyActionRequest):
+    try:
+        return study_action(request.project, request.action, str(request.block_id), request.planned_at)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class CheckInRequest(Model):
+    project: Project
+    assessment_id: UUID
+    activity_id: UUID
+    status: Literal["on_track", "need_more_time", "finished"]
+    expected_remaining: int = Field(ge=0, le=12000, multiple_of=30)
+    remaining_minutes: int | None = Field(default=None, ge=0, le=12000, multiple_of=30)
+
+
+@app.post("/api/estimates/check-in", dependencies=[Depends(browser_request)], response_model=Project)
+def estimate_check_in(request: CheckInRequest):
+    try:
+        return check_in(request.project, request.assessment_id, request.activity_id, request.status,
+                        request.expected_remaining, request.remaining_minutes)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+class ChatRequest(Model):
+    expected_provider: Literal["ollama", "ollama_cloud", "azure", "openai"] | None = None
+    project: Project
+    messages: list[ChatMessage] = Field(min_length=1, max_length=12)
+    consent: bool
+
+
+class ProposalRequest(Model):
+    project: Project
+    proposal: Proposal
+
+
+@app.get("/api/assistant/usage", response_model=ChatUsage)
+def assistant_usage():
+    try:
+        return chat_budget.status(datetime.now().astimezone())
+    except (OSError, sqlite3.Error) as exc:
+        raise HTTPException(503, "Chat usage could not be loaded. Direct edits remain available.") from exc
+
+
+@app.post("/api/assistant/propose", dependencies=[Depends(browser_request)], response_model=Proposal)
+async def propose_change(request: ChatRequest):
+    if request.messages[-1].role != "user":
+        raise HTTPException(400, "Send a message describing your schedule change or app question.")
+    help_answer = local_help(request.messages[-1].content)
+    if help_answer is None and not request.consent:
+        raise HTTPException(400, "Confirm that your message and limited planning context may be sent to your AI provider.")
+    config = load_chat_config() if help_answer is None else None
+    if config and request.expected_provider and config.provider != request.expected_provider:
+        raise HTTPException(409, "The chat provider changed. Reload the app and review the new consent notice before sending. No message was sent.")
+    if not assistant_lock.acquire(blocking=False):
+        raise HTTPException(409, "Another chat request is running. Please wait before retrying.")
+    try:
+        now = datetime.now(ZoneInfo(request.project.settings.timezone))
+        usage = chat_budget.reserve(now)
+        if help_answer:
+            topic, answer = help_answer
+            draft = Interpretation(intent="help", help_topic=topic, message=answer, questions=[], commitments=[], effort_changes=[])
+        else:
+            draft = await run_in_threadpool(interpret, request.project, request.messages, config, now)
+        proposal = build_proposal(request.project, draft, now)
+        proposal.usage = usage
+        return proposal
+    except DailyLimitError as exc:
+        raise HTTPException(429, str(exc)) from exc
+    except (OSError, sqlite3.Error) as exc:
+        raise HTTPException(503, "Chat usage could not be saved. No AI request was sent; direct edits remain available.") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc) if isinstance(exc, AssistantError) else "Invalid proposed change. Your plan has not changed.") from exc
+    finally:
+        assistant_lock.release()
+
+
+@app.post("/api/assistant/review", dependencies=[Depends(browser_request)], response_model=Proposal)
+def review_change(request: ProposalRequest):
+    try:
+        return review_proposal(request.project, request.proposal, datetime.now(ZoneInfo(request.project.settings.timezone)))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc) if isinstance(exc, AssistantError) else "Invalid proposal. Check the dates and hours.") from exc
+
+
+@app.post("/api/assistant/apply", dependencies=[Depends(browser_request)], response_model=Project)
+def apply_change(request: ProposalRequest):
+    try:
+        return apply_proposal(request.project, request.proposal, datetime.now(ZoneInfo(request.project.settings.timezone)))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc) if isinstance(exc, AssistantError) else "Invalid proposal. Check the dates and hours.") from exc
 
 
 @app.post("/api/extract", dependencies=[Depends(browser_request)])

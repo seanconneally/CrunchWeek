@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, time
 from typing import Callable
 
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from crunch_week.documents import Document, chunks
+from crunch_week.documents import Document, chunks, reference_context
 from crunch_week.models import Assessment, AssessmentKind, Settings, stable_id
 
 
@@ -51,11 +52,20 @@ convention differs or the year is missing, leave the date null and explain in no
 Use weight_percent on a 0..100 scale, relative to that module, never a fraction.
 Do not treat example deadlines or dates in references as assessments.
 Include a verbatim short evidence excerpt and its 1-based [PAGE] number.
+Read assessment tables by ROW, associating each title with its own date and weight.
+Carry module identity and repeated table headings into continuation rows, using local
+content over header context. Distinguish each dated quiz/report occurrence in its title;
+do not collapse separate deadlines into a generic 'Quiz' or 'Report'. Headers supplied
+as REFERENCE CONTEXT are only for module identity: do not extract extra assessments from
+them unless their evidence also occurs in this segment. Keep evidence as a SHORT exact
+quote from one source page, preserving its assessment name/date/weight where possible.
 Report conflicting dates, missing information and incomplete context in warnings/notes.
 """
 
 
 def normalize(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text).replace("\u00ad", "")
+    text = re.sub(r"(?<=\w)-[ \t]*\n[ \t]*(?=\w)", "", text)
     return re.sub(r"\s+", " ", text).casefold().strip()
 
 
@@ -65,21 +75,30 @@ def convert_item(item: ExtractedItem, document: Document) -> Assessment:
     due_time = None
     try:
         due_date = date.fromisoformat(item.due_date) if item.due_date else None
-        if item.due_time and due_date:
+    except ValueError:
+        notes.append("The AI returned an invalid date. Check the source and enter it manually.")
+    if item.due_time and due_date:
+        try:
             if not re.fullmatch(r"\d{2}:\d{2}", item.due_time):
                 raise ValueError("Invalid time")
             due_time = time.fromisoformat(item.due_time)
-    except ValueError:
-        due_date = due_time = None
-        notes.append("The AI returned an invalid date/time. Check the source and enter it manually.")
+        except ValueError:
+            notes.append("The AI returned an invalid time. The valid date was kept; verify the time manually.")
     page = item.source_page
-    quote_valid = bool(item.evidence.strip()) and page is not None and 1 <= page <= len(document.pages)
+    evidence = normalize(item.evidence)
+    quote_valid = bool(evidence) and page is not None and 1 <= page <= len(document.pages)
     if quote_valid:
-        quote_valid = normalize(item.evidence) in normalize(document.pages[page - 1])
+        quote_valid = evidence in normalize(document.pages[page - 1])
+    if not quote_valid and evidence:
+        matches = [index for index,text in enumerate(document.pages,1) if evidence in normalize(text)]
+        if len(matches) == 1:
+            page = matches[0]
+            quote_valid = True
+            notes.append("Source page corrected by matching the quoted evidence.")
     if not quote_valid:
-        notes.append("Evidence could not be matched to the stated page. Date/time cleared; verify manually.")
+        notes.append("Evidence could not be matched to a unique source page. Date/time/weight cleared; verify manually.")
         due_date = due_time = None
-    weight = item.weight_percent
+    weight = item.weight_percent if quote_valid else None
     if weight is not None and not 0 <= weight <= 100:
         weight = None
         notes.append("Invalid weighting cleared.")
@@ -137,7 +156,7 @@ def extract_document(
     if not model.strip() or len(model) > 120:
         raise ExtractionError("Enter a valid model ID.")
     result: list[Assessment] = []
-    warnings: list[str] = []
+    warnings: list[str] = list(document.warnings)
     pieces = chunks(document)
     try:
         with OpenAI(api_key=api_key.strip(), base_url=base_url, timeout=60.0, max_retries=2) as client:
@@ -149,6 +168,7 @@ def extract_document(
                     instructions=INSTRUCTIONS,
                     input=f"Semester start: {settings.semester_start}; end: {settings.semester_end}. "
                     f"Timezone: {settings.timezone}. Filename: {document.name}\n"
+                    f"REFERENCE CONTEXT (identity only; not additional assessments):\n{reference_context(document, piece)}\n"
                     f"Document segment {index}/{len(pieces)}:\n{piece}",
                     text_format=ExtractionResult,
                     store=False,

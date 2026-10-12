@@ -9,11 +9,13 @@ export function UploadDialog({
   config,
   close,
   save,
+  addManually,
 }: {
   project: Project;
   config: Config;
   close: () => void;
   save: (project: Project) => void;
+  addManually: () => void;
 }) {
   const [files, setFiles] = useState<File[]>([]);
   const [consent, setConsent] = useState(false);
@@ -23,7 +25,7 @@ export function UploadDialog({
   const [warnings, setWarnings] = useState<string[]>([]);
   const [finished, setFinished] = useState(false);
   return (
-    <Modal title="From handbook to head start" close={close} busy={busy}>
+    <Modal title="Upload module documents" close={close} busy={busy}>
       <p className="muted">
         Upload module PDFs, Word docs, PowerPoints, spreadsheets, or a ZIP
         straight from Moodle. We'll pull out assessments, deadlines and weights
@@ -33,8 +35,8 @@ export function UploadDialog({
         <div className="notice">
           <Info size={18} aria-hidden="true" />
           <span>
-            {config.ai_error} You can use the demo or enter assessments manually
-            now.
+            Document extraction is unavailable right now. You can still build
+            your plan by adding assessments manually.
           </span>
         </div>
       )}
@@ -80,7 +82,8 @@ export function UploadDialog({
       </label>
       <p className="small muted">
         The backend does not retain raw uploads after processing. Extracted
-        entries and source excerpts stay in this browser tab. AI can miss or
+        entries and source excerpts are saved in this browser on this device.
+        Download a project backup to keep a separate copy. AI can miss or
         misread details; review against the original.
       </p>
       {status && (
@@ -104,6 +107,15 @@ export function UploadDialog({
         </details>
       )}
       <div className="modal-actions">
+        {!finished && (
+          <button
+            className="button secondary"
+            disabled={busy}
+            onClick={addManually}
+          >
+            Add an assessment manually
+          </button>
+        )}
         {finished ? (
           <button className="button primary" onClick={close}>
             Review assessments

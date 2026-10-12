@@ -5,6 +5,7 @@ test("demo, review, constrained planning, calendar download and backup restore",
 }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Explore the demo" }).click();
+  await page.getByRole("button", { name: "Semester", exact: true }).click();
   await expect(page.getByText("Week 10 needs a head start.")).toBeVisible();
   await page.getByRole("button", { name: "Assessments", exact: true }).click();
   await page
@@ -34,9 +35,7 @@ test("demo, review, constrained planning, calendar download and backup restore",
     .click();
   await page.getByRole("button", { name: "Study plan", exact: true }).click();
   await expect(page.getByText("Some work still needs room.")).toBeVisible();
-  await page
-    .getByRole("button", { name: "Notion & exports", exact: true })
-    .click();
+  await page.getByRole("button", { name: "Exports", exact: true }).click();
   const calendarPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: /Calendar \(\.ics\)/ }).click();
   expect((await calendarPromise).suggestedFilename()).toBe("crunch-week.ics");
@@ -51,10 +50,13 @@ test("demo, review, constrained planning, calendar download and backup restore",
   await page
     .getByRole("button", { name: "Start my semester", exact: true })
     .click();
-  await expect(page.getByText("Three handbooks.")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: /Your deadlines/ }),
+  ).toBeVisible();
   await page
     .getByLabel("Project backup file", { exact: true })
     .setInputFiles(path!);
+  await page.getByRole("button", { name: "Semester", exact: true }).click();
   await expect(page.getByText("Week 10 needs a head start.")).toBeVisible();
   await page.reload();
   await page.getByRole("button", { name: "Assessments", exact: true }).click();
@@ -102,6 +104,8 @@ test("mobile layout has no horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");
   await page.getByRole("button", { name: "Explore the demo" }).click();
+  await expect(page.locator("#today-title")).toBeVisible();
+  await page.getByRole("button", { name: "Semester", exact: true }).click();
   await expect(page.getByText("Your semester, at a glance.")).toBeVisible();
   expect(
     await page.evaluate(

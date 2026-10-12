@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,7 @@ class Document:
     name: str
     digest: str
     pages: tuple[str, ...]
+    warnings: tuple[str, ...] = ()
 
     @property
     def text(self) -> str:
@@ -47,18 +49,53 @@ def _pdf_pages(data: bytes) -> list[str]:
             content = page.get_contents()
             if content is not None and len(content.get_data()) > 8 * 1024 * 1024:
                 raise DocumentError("A PDF page is too complex. Export a simpler text PDF.")
-            text = page.extract_text() or ""
+            plain = page.extract_text() or ""
+            text = plain
+            try:
+                layout = (
+                    page.extract_text(
+                        extraction_mode="layout", layout_mode_space_vertically=False, layout_mode_strip_rotated=False
+                    )
+                    or ""
+                )
+
+                # Use spatial rows only when every plain-extraction token survives.
+                # Rotated text and unusual fonts must not silently disappear.
+                def tokens(value):
+                    return Counter(re.findall(r"\w+", value.casefold()))
+
+                if layout.strip() and not (tokens(plain) - tokens(layout)):
+                    text = layout
+            except Exception:
+                pass  # A layout failure must still permit the readable plain copy.
+            paint_ops = {
+                b"Do",
+                b"Tj",
+                b"TJ",
+                b"'",
+                b'"',
+                b"S",
+                b"s",
+                b"f",
+                b"F",
+                b"f*",
+                b"B",
+                b"B*",
+                b"b",
+                b"b*",
+                b"sh",
+            }
+            has_paint = content is not None and any(operator in paint_ops for _, operator in content.operations)
+            if not text.strip() and (len(page.images) or has_paint):
+                raise DocumentError(
+                    "At least one page has non-text content without readable text. OCR the whole PDF first so no assessments are missed."
+                )
             total += len(text)
             if total > MAX_CHARS:
                 raise DocumentError("Document is too long. Upload the assessment section only.")
             pages.append(text)
         if not any(text.strip() for text in pages):
             raise DocumentError("No readable text found. OCR scanned PDFs first, or paste the assessment text.")
-        # Never silently miss a scanned page among text pages.
-        if any(not text.strip() for text in pages):
-            raise DocumentError(
-                "At least one page has no readable text. Remove blank pages or OCR the whole PDF first."
-            )
         return pages
     except DocumentError:
         raise
@@ -341,7 +378,7 @@ def _pages_for(name: str, data: bytes) -> list[str]:
     raise DocumentError("Supported files: PDF, Word, PowerPoint, Excel, OpenDocument, HTML, RTF, text, CSV and ZIP.")
 
 
-def _zip_pages(data: bytes) -> list[str]:
+def _zip_pages(data: bytes, warnings: list[str] | None = None) -> list[str]:
     archive = _open_office_zip(data, "ZIP")
     pages: list[str] = []
     errors: list[str] = []
@@ -358,12 +395,14 @@ def _zip_pages(data: bytes) -> list[str]:
         except DocumentError as error:
             errors.append(f"{base}: {error}")
             continue
-        pages.extend(f"[FILE {base}]\n{page}" for page in member_pages if page.strip())
+        pages.extend(f"[FILE {member}]\n{page}" for page in member_pages if page.strip())
         if len(pages) > MAX_ZIP_PAGES:
             raise DocumentError(f"This ZIP has more than {MAX_ZIP_PAGES} pages of content. Upload fewer files.")
     if not pages:
         detail = f" {errors[0]}" if errors else ""
         raise DocumentError(f"No readable handbooks found in this ZIP.{detail}")
+    if warnings is not None:
+        warnings.extend(f"Skipped unreadable ZIP file: {error}" for error in errors)
     return pages
 
 
@@ -375,7 +414,10 @@ def read_document(name: str, data: bytes) -> Document:
     if not data or len(data) > MAX_BYTES:
         raise DocumentError(f"Each file must be nonempty and no larger than {MAX_BYTES // (1024 * 1024)} MB.")
     suffix = Path(safe_name).suffix.casefold()
-    pages = _zip_pages(data) if suffix == ".zip" else _pages_for(safe_name, data)
+    warnings: list[str] = []
+    pages = _zip_pages(data, warnings) if suffix == ".zip" else _pages_for(safe_name, data)
+    if suffix == ".pdf" and any(not page.strip() for page in pages):
+        warnings.append("Blank PDF pages were skipped for extraction; original source page numbers are preserved.")
     pages = [page for page in pages if page.strip()] if suffix != ".pdf" else pages
     if not pages:
         raise DocumentError("No readable text found in this file.")
@@ -383,27 +425,65 @@ def read_document(name: str, data: bytes) -> Document:
         raise DocumentError("Upload readable text of 1–120,000 characters.")
     if sum(len(page) for page in pages) > MAX_CHARS:
         raise DocumentError("Document is too long. Upload the assessment section only.")
-    return Document(safe_name, hashlib.sha256(data).hexdigest(), tuple(pages))
+    return Document(safe_name, hashlib.sha256(data).hexdigest(), tuple(pages), tuple(warnings))
 
 
 def chunks(document: Document, size: int = 18_000, overlap: int = 800) -> list[str]:
-    """Keep page markers and overlap long pages to protect split table rows."""
-    if size < 1000 or not 0 <= overlap < size:
+    """Prefer line/row boundaries and preserve context across page/chunk breaks."""
+    if size < 1000 or not 0 <= overlap < size // 2:
         raise ValueError("Invalid chunk size/overlap")
+    payload = size - overlap - 64
     parts: list[str] = []
     current = ""
+    previous: tuple[int, str] | None = None
     for number, page in enumerate(document.pages, 1):
-        for start in range(0, max(len(page), 1), size - overlap):
-            piece = f"[PAGE {number}]\n{page[start : start + size]}\n"
+        if not page.strip():
+            continue
+        start = 0
+        while start < len(page):
+            end = min(len(page), start + payload)
+            if end < len(page):
+                boundary = page.rfind("\n", start + payload // 2, end)
+                if boundary >= 0:
+                    end = boundary + 1
+            text = page[start:end]
+            piece = f"[PAGE {number}]\n{text}\n"
             if current and len(current) + len(piece) > size:
                 parts.append(current)
                 current = ""
+                if previous and overlap:
+                    old_page, old_text = previous
+                    tail = old_text[-overlap:]
+                    # Start overlap at a full line where feasible.
+                    if "\n" in tail and len(old_text) > overlap:
+                        tail = tail.split("\n", 1)[-1]
+                    context = f"[PAGE {old_page}]\n{tail}\n"
+                    if len(context) + len(piece) <= size:
+                        current = context
             current += piece
-            if start + size >= len(page):
-                break
+            previous = (number, text)
+            start = end
     if current:
         parts.append(current)
     return parts
+
+
+def reference_context(document: Document, piece: str) -> str:
+    """Carry short file headers for module identity, not additional extraction."""
+    pages = [int(number) for number in re.findall(r"\[PAGE (\d+)\]", piece)]
+    headers: dict[str, str] = {}
+    if document.name.lower().endswith(".zip"):
+        for page in document.pages:
+            marker = re.match(r"\[FILE ([^\n]+)\]", page)
+            if marker:
+                headers.setdefault(marker[1], page[:800])
+        selected = []
+        for number in pages:
+            marker = re.match(r"\[FILE ([^\n]+)\]", document.pages[number - 1])
+            if marker and headers[marker[1]] not in selected:
+                selected.append(headers[marker[1]])
+        return "\n".join(selected)[:2400]
+    return next((page[:800] for page in document.pages if page.strip()), "")
 
 
 if __name__ == "__main__":

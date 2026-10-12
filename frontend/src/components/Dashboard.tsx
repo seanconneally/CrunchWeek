@@ -38,12 +38,20 @@ export function Dashboard({
   const [showStudy, setShowStudy] = useState(false);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [reveal] = useState(() => !revealed);
-  const reviewed = project.assessments.filter((item) => item.reviewed);
+  const reviewed = project.assessments.filter(
+    (item) => item.reviewed && !item.completed,
+  );
   const crunch = result.weeks.filter((week) => week.Pressure === "Crunch");
-  const remaining = project.assessments.length - reviewed.length;
+  const remaining = project.assessments.filter(
+    (item) => !item.reviewed && !item.completed,
+  ).length;
   const shortfall =
     result.plan.shortfalls.reduce((sum, row) => sum + row.minutes, 0) / 60;
-  const peak = [...result.weeks].sort((a, b) => b.Deadlines - a.Deadlines)[0];
+  const peak = [...result.weeks].sort(
+    (a, b) =>
+      b["Load percent"] - a["Load percent"] ||
+      b["Effort (h)"] - a["Effort (h)"],
+  )[0];
   const max = Math.max(4, ...result.weeks.map((week) => week.Deadlines));
   const selectedWeek =
     selected === null
@@ -168,7 +176,7 @@ export function Dashboard({
         <div
           className="strip"
           role="group"
-          aria-label="Weekly deadline counts"
+          aria-label="Weekly deadlines and study workload"
           data-dense={result.weeks.length > 16 ? "" : undefined}
           style={
             {
@@ -197,9 +205,9 @@ export function Dashboard({
               onClick={() =>
                 setSelected(selected === week.Week ? null : week.Week)
               }
-              aria-label={`Week ${week.Week}, from ${dateLabel(week.Starting)}: ${week.Deadlines} deadline${week.Deadlines === 1 ? "" : "s"}${week.Pressure === "Crunch" ? ", crunch week" : ""}`}
+              aria-label={`Week ${week.Week}, from ${dateLabel(week.Starting)}: ${week.Deadlines} deadline${week.Deadlines === 1 ? "" : "s"}${week.Pressure === "Crunch" ? ", crunch week" : ""}, ${week["Effort (h)"]} hours due, ${week["Capacity (h)"]} hours available`}
               aria-pressed={selected === week.Week}
-              title={`${dateLabel(week.Starting)} · ${week.Deadlines} deadlines · ${week["Effort (h)"]}h estimated work`}
+              title={`${dateLabel(week.Starting)} · ${week.Deadlines} deadlines · ${week["Effort (h)"]}h work due · ${week["Capacity (h)"]}h available`}
               style={{ "--i": i } as CSSProperties}
             >
               <span className="week-count" aria-hidden="true">
@@ -233,6 +241,9 @@ export function Dashboard({
               <span className="week-date" aria-hidden="true">
                 {dateLabel(week.Starting)}
               </span>
+              <span className="week-load">
+                {week["Effort (h)"] ? `${hours(week["Effort (h)"])}h due` : "—"}
+              </span>
               {week.Week === currentWeek ? (
                 <span className="week-today" aria-hidden="true">
                   Today
@@ -259,7 +270,7 @@ export function Dashboard({
             </h3>
             <p>
               {peak?.Deadlines
-                ? `${peak.Deadlines} deadlines land from ${dateLabel(peak.Starting)}. Your plan works backwards to make space before the rush.`
+                ? `${peak.Deadlines} deadlines land from ${dateLabel(peak.Starting)}. About ${hours(peak["Effort (h)"])} h of work is due, against ${hours(peak["Capacity (h)"])} h still available that week. Start earlier to share the load.`
                 : "Review your assessments to see where the busy weeks land."}
             </p>
             {peak && Object.keys(peak["Module weights"]).length > 0 && (
@@ -299,7 +310,7 @@ export function Dashboard({
           <p>
             <b>{crunch.length}</b>
             <span>
-              <strong>Crunch weeks</strong> 3+ deadlines in one week
+              <strong>Crunch weeks</strong> work due exceeds weekly free hours
             </span>
           </p>
           <p>
@@ -338,8 +349,10 @@ export function Dashboard({
           </p>
         </div>
         <p className="hero-footnote">
-          Week 1 starts {dateLabel(project.settings.semester_start)}. Break
-          weeks are included; confirm your university's teaching-week dates.
+          Pressure compares remaining work due with available study hours in
+          that week; it is a workload signal, not a prediction of failure. Week
+          1 starts {dateLabel(project.settings.semester_start)}. Break weeks are
+          included; confirm your university's teaching-week dates.
         </p>
       </section>
       <div className="overview-lower">

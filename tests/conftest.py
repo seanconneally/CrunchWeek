@@ -28,3 +28,10 @@ def project():
             )
         ],
     )
+
+
+@pytest.fixture(autouse=True)
+def isolated_chat_budget(monkeypatch, tmp_path):
+    import crunch_week.api as api
+    from crunch_week.chat_usage import DailyChatBudget
+    monkeypatch.setattr(api, "chat_budget", DailyChatBudget(tmp_path / "usage.sqlite3"))

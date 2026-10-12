@@ -42,7 +42,9 @@ for (const configured of [true, false]) {
     } else {
       await expect(submit).toBeDisabled();
       await expect(
-        page.getByText("Set AZURE_OPENAI_API_KEY", { exact: false }),
+        page.getByText("Document extraction is unavailable right now.", {
+          exact: false,
+        }),
       ).toBeVisible();
     }
   });

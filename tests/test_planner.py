@@ -29,6 +29,7 @@ def test_schedule_conserves_effort_and_never_overlaps(project):
 
 
 def test_backwards_scheduling_and_determinism(project):
+    project.settings.planning_style = "deadline"
     first = build_plan(project)
     assert first == build_plan(project)
     assert first.blocks[-1].end == datetime(2026, 10, 8, 20, tzinfo=project_zone(project))
@@ -71,7 +72,9 @@ def test_clashes_keep_module_weights_separate(project):
         for i in range(2)
     ]
     week = weekly_summary(project)[0]
-    assert week["Pressure"] == "Crunch"
+    assert week["Pressure"] == "Busy"
+    assert week["Capacity (h)"] == 15
+    assert week["Effort (h)"] == 12
     assert week["Module weights"] == {"CS401": 40, "Other": 100}
     assert week["Deadlines"] == 3
 

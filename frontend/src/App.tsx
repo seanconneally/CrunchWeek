@@ -2,10 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import {
   CalendarClock,
+  Moon,
+  Sun,
+  Sunrise,
   ChartNoAxesColumn,
   Download,
   FlaskConical,
+  FolderOpen,
   ListChecks,
+  MessageCircle,
   Plus,
   RotateCcw,
   Settings2,
@@ -13,8 +18,21 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import type { Assessment, Config, PlanResponse, Project, Tab } from "./types";
+import type {
+  Assessment,
+  ChatProposal,
+  CheckInStatus,
+  Config,
+  PlanResponse,
+  Project,
+  RecoveryOption,
+  Settings,
+  StudyAction,
+  StudyBlock,
+  Tab,
+} from "./types";
 import { message, request, saveBlob } from "./api";
+import { Modal } from "./components/Modal";
 import { Dashboard } from "./components/Dashboard";
 import { Assessments } from "./components/Assessments";
 import { AssessmentEditor } from "./components/AssessmentEditor";
@@ -24,25 +42,77 @@ import { StudyPlan } from "./components/StudyPlan";
 import { NotionPanel } from "./components/NotionPanel";
 import { addDays, dateLabel, daysBetween, todayIn } from "./utils";
 
-const STORAGE_KEY = "crunch-week-project-v1";
+import { CommitmentsDialog } from "./components/CommitmentsDialog";
+import { RecoveryDialog } from "./components/RecoveryDialog";
+import { FocusDock } from "./components/FocusDock";
+import { readFocus } from "./focus";
+import type { FocusSession } from "./focus";
+import { Today } from "./components/Today";
+import { ChatPanel } from "./components/ChatPanel";
+import { SessionCheckIn } from "./components/SessionCheckIn";
+import { assistantKey, planningKey } from "./planning";
+import { loggedMinutes } from "./estimates";
+import { readLibrary, storeProject } from "./storage";
 const nav = [
-  { id: "overview", label: "Overview", icon: ChartNoAxesColumn },
+  { id: "today", label: "Today", icon: Sunrise },
+  { id: "overview", label: "Semester", icon: ChartNoAxesColumn },
   { id: "assessments", label: "Assessments", icon: ListChecks },
   { id: "study", label: "Study plan", icon: CalendarClock },
-  { id: "notion", label: "Notion & exports", icon: Share },
+  { id: "notion", label: "Exports", icon: Share },
 ] as const;
 
 export default function App() {
+  const [theme, setTheme] = useState<"light" | "dark">(() => {
+    try {
+      return localStorage.getItem("crunch-week-theme") === "dark"
+        ? "dark"
+        : "light";
+    } catch {
+      return "light";
+    }
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem("crunch-week-theme", theme);
+    } catch {
+      /* Appearance still works without browser storage. */
+    }
+  }, [theme]);
   const [project, setProject] = useState<Project | null>(null);
   const [config, setConfig] = useState<Config | null>(null);
   const [result, setResult] = useState<PlanResponse | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
-  const [modal, setModal] = useState<"settings" | "upload" | null>(null);
+  const [tab, setTab] = useState<Tab>("today");
+  const [modal, setModal] = useState<
+    "settings" | "upload" | "library" | "recovery" | "commitments" | null
+  >(null);
   const [editing, setEditing] = useState<Assessment | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [planning, setPlanning] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [library, setLibrary] = useState<Project[]>([]);
+  const [revision, setRevision] = useState(0);
+  const [notice, setNotice] = useState("");
+  const [recoveryUndo, setRecoveryUndo] = useState<{
+    project_id: string;
+    before: Settings;
+    after: Settings;
+  } | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatDraft, setChatDraft] = useState<{
+    id: number;
+    text: string;
+  } | null>(null);
+  function trainingChat() {
+    setChatDraft({ id: Date.now(), text: "" });
+    setChatOpen(true);
+  }
+  const [checkIn, setCheckIn] = useState<{
+    project_id: string;
+    activity_id: string;
+  } | null>(null);
+  const [focus, setFocus] = useState<FocusSession | null>(readFocus);
   const restoreInput = useRef<HTMLInputElement>(null);
   const projectRef = useRef<Project | null>(null);
 
@@ -50,7 +120,8 @@ export default function App() {
     projectRef.current = next;
     setProject(next);
     try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      const stored = storeProject(next);
+      setLibrary(Object.values(stored.projects));
       setSaved(true);
     } catch {
       setSaved(false);
@@ -74,9 +145,14 @@ export default function App() {
         setConfig(settings);
         let stored: string | null = null;
         try {
-          stored = sessionStorage.getItem(STORAGE_KEY);
+          const semesters = readLibrary();
+          setLibrary(Object.values(semesters.projects));
+          const activeProject = semesters.projects[semesters.active];
+          stored = activeProject ? JSON.stringify(activeProject) : null;
         } catch {
-          /* Downloads remain available. */
+          setError(
+            "Saved browser data could not be read. A new semester is open; restore a downloaded backup if needed.",
+          );
         }
         if (stored) {
           try {
@@ -89,7 +165,7 @@ export default function App() {
           } catch {
             if (active)
               setError(
-                "The saved tab project could not be restored. Import a project backup, or start a new semester.",
+                "The saved semester could not be restored. Import a project backup, or start a new semester.",
               );
           }
         }
@@ -106,6 +182,9 @@ export default function App() {
       active = false;
     };
   }, []);
+  // Checklist and note edits do not affect scheduling. Keep the existing agenda
+  // mounted while those changes save so keyboard/checkbox focus is preserved.
+  const planKey = project ? planningKey(project) : "";
   useEffect(() => {
     if (!project) return;
     const controller = new AbortController();
@@ -120,7 +199,7 @@ export default function App() {
         if (!controller.signal.aborted) setPlanning(false);
       });
     return () => controller.abort();
-  }, [project]);
+  }, [planKey, revision]);
   async function act(action: () => Promise<void>) {
     setBusy(true);
     setError("");
@@ -133,16 +212,209 @@ export default function App() {
     }
   }
   async function replaceWith(path: string) {
+    // Select the starting tab before loading: later navigation is the user's choice.
+    setTab("today");
+    await act(async () => {
+      persist(await request<Project>(path));
+    });
+  }
+  function handleStudy(action: StudyAction, blockId: string) {
+    const current = projectRef.current;
+    if (!current || !result) return;
+    void act(async () => {
+      const next = await request<Project>("/study/action", {
+        project: current,
+        action,
+        block_id: blockId,
+        planned_at: result.planned_at,
+      });
+      persist(next);
+      if (action === "done")
+        setCheckIn({ project_id: next.id, activity_id: blockId });
+      if (action === "undo" && checkIn?.activity_id === blockId)
+        setCheckIn(null);
+      setNotice(
+        action === "done"
+          ? "Session logged. Your remaining work and plan have been updated."
+          : action === "skipped"
+            ? "Session moved. We’re finding another slot; any work that cannot fit will stay visible."
+            : "Activity undone. Your plan has been rebuilt.",
+      );
+    });
+  }
+  function saveWorkResponse(snapshot: Project, next: Project) {
+    const latest = projectRef.current;
+    if (!latest || assistantKey(latest) !== assistantKey(snapshot))
+      throw new Error(
+        "Your plan changed in the app while this saved. Your edits were kept; review again.",
+      );
+    // Merge only the fields these endpoints can change, preserving note/task edits.
+    persist({
+      ...latest,
+      settings: { ...latest.settings, commitments: next.settings.commitments },
+      assessments: latest.assessments.map((item) => ({
+        ...item,
+        effort_minutes:
+          next.assessments.find((row) => row.id === item.id)?.effort_minutes ??
+          item.effort_minutes,
+      })),
+      study_history: next.study_history,
+    });
+  }
+  async function applyAssistant(proposal: ChatProposal) {
+    const current = projectRef.current;
+    if (!current) return;
+    setBusy(true);
+    try {
+      const next = await request<Project>("/assistant/apply", {
+        project: current,
+        proposal,
+      });
+      saveWorkResponse(current, next);
+      setNotice("Reviewed changes applied. Your study plan is updating.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function saveCheckIn(
+    status: CheckInStatus,
+    remaining: number | null,
+    expected: number,
+  ) {
+    const current = projectRef.current;
+    if (!current || !checkIn || current.id !== checkIn.project_id)
+      throw new Error("Open the session’s original semester first.");
+    const activity = current.study_history.find(
+      (row) => row.id === checkIn.activity_id,
+    );
+    if (!activity) throw new Error("This session was undone.");
+    setBusy(true);
+    try {
+      const next = await request<Project>("/estimates/check-in", {
+        project: current,
+        assessment_id: activity.assessment_id,
+        activity_id: activity.id,
+        status,
+        expected_remaining: expected,
+        remaining_minutes: remaining,
+      });
+      saveWorkResponse(current, next);
+      setNotice(
+        status === "finished"
+          ? "Study work finished. The submission deadline stays visible."
+          : status === "need_more_time"
+            ? "Remaining hours updated. Your plan will show what fits."
+            : "Progress check saved. Your estimate is unchanged.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function applyRecovery(option: RecoveryOption) {
+    const current = projectRef.current;
+    if (!current) return;
+    const next = await request<Project>("/recovery/apply", {
+      project: current,
+      option_id: option.id,
+      expected_settings: option.settings,
+    });
+    persist(next);
+    setRecoveryUndo({
+      project_id: current.id,
+      before: current.settings,
+      after: next.settings,
+    });
+    setNotice(
+      "Availability updated. Your plan is being rebuilt; you can undo this change below.",
+    );
+  }
+  function undoRecovery() {
+    const current = projectRef.current;
     if (
-      project?.assessments.length &&
+      !current ||
+      !recoveryUndo ||
+      current.id !== recoveryUndo.project_id ||
+      JSON.stringify(current.settings) !== JSON.stringify(recoveryUndo.after)
+    )
+      return;
+    void act(async () => {
+      await validateAndSave({ ...current, settings: recoveryUndo.before });
+      setRecoveryUndo(null);
+      setNotice(
+        "Availability change undone. Your study progress has been kept.",
+      );
+    });
+  }
+  function startFocus(block: StudyBlock) {
+    if (!project || !result) return;
+    if (
+      focus &&
       !window.confirm(
-        "Replace this tab’s project? Download a backup first if you want to keep it. Your Notion database will not be deleted.",
+        "Replace the current focus timer? Study progress stays recorded.",
       )
     )
       return;
-    await act(async () => {
-      persist(await request<Project>(path));
-      setTab("overview");
+    setFocus({
+      project_id: project.id,
+      block,
+      planned_at: result.planned_at,
+      elapsed_ms: 0,
+      started_at: Date.now(),
+    });
+  }
+  function finishFocus(session: FocusSession) {
+    const current = projectRef.current;
+    if (!current || current.id !== session.project_id) return;
+    void act(async () => {
+      const next = await request<Project>("/study/action", {
+        project: current,
+        action: "done",
+        block_id: session.block.id,
+        planned_at: session.planned_at,
+      });
+      persist(next);
+      setFocus(null);
+      setCheckIn({ project_id: next.id, activity_id: session.block.id });
+      setNotice("Focus session logged. Your remaining work has been updated.");
+    });
+  }
+  useEffect(() => {
+    if (
+      focus &&
+      project?.id === focus.project_id &&
+      project.study_history.some((row) => row.id === focus.block.id)
+    )
+      setFocus(null);
+  }, [focus, project]);
+  function toggleTask(assessmentId: string, taskId: string) {
+    const current = projectRef.current;
+    if (!current || busy) return;
+    const next = {
+      ...current,
+      assessments: current.assessments.map((item) =>
+        item.id === assessmentId
+          ? {
+              ...item,
+              tasks: item.tasks.map((task) =>
+                task.id === taskId ? { ...task, done: !task.done } : task,
+              ),
+            }
+          : item,
+      ),
+    };
+    // Show the tick immediately; rollback if validation or saving fails.
+    projectRef.current = next;
+    setProject(next);
+    void act(async () => {
+      try {
+        await validateAndSave(next);
+      } catch (err) {
+        if (projectRef.current === next) {
+          projectRef.current = current;
+          setProject(current);
+        }
+        throw err;
+      }
     });
   }
   function newAssessment() {
@@ -160,6 +432,8 @@ export default function App() {
       evidence: "",
       notes: "",
       reviewed: false,
+      completed: false,
+      tasks: [],
     });
   }
   if (!project || !config)
@@ -195,14 +469,17 @@ export default function App() {
   );
   return (
     <div className="app">
+      <a className="skip-link" href="#main-content">
+        Skip to main content
+      </a>
       <aside className="sidebar">
         <a
           className="brand"
           href="#"
-          aria-label="Crunch Week overview"
+          aria-label="Crunch Week today"
           onClick={(e) => {
             e.preventDefault();
-            setTab("overview");
+            setTab("today");
           }}
         >
           <BrandMark />
@@ -211,7 +488,11 @@ export default function App() {
             <span>week</span>
           </span>
         </a>
-        <button className="semester" onClick={() => setModal("settings")}>
+        <button
+          className="semester"
+          disabled={busy}
+          onClick={() => setModal("settings")}
+        >
           <span className="semester-name">{project.name}</span>
           <span className="semester-dates">
             {dateLabel(semester_start)} – {dateLabel(semester_end)}
@@ -229,6 +510,7 @@ export default function App() {
             <i />
           </span>
         </button>
+        <div className="sidebar-caption">YOUR WORKSPACE</div>
         <nav className="nav" aria-label="Main navigation">
           {nav.map(({ id, label, icon: Icon }) => (
             <button
@@ -245,16 +527,72 @@ export default function App() {
           ))}
         </nav>
         <div className="sidebar-foot">
-          <button className="side-link" onClick={() => setModal("settings")}>
+          <button
+            className="side-link"
+            disabled={busy}
+            onClick={() => setModal("settings")}
+          >
             <Settings2 size={18} aria-hidden="true" />
             Semester & availability
+          </button>
+          <label className="field semester-library">
+            Saved semesters
+            <select
+              aria-label="Saved semesters"
+              value={project.id}
+              disabled={busy}
+              onChange={(e) => {
+                const next = library.find((row) => row.id === e.target.value);
+                if (next)
+                  void act(async () => {
+                    await validateAndSave(next);
+                    setTab("today");
+                    setNotice("");
+                  });
+              }}
+            >
+              {library.map((row) => (
+                <option key={row.id} value={row.id}>
+                  {row.name}
+                  {row.demo ? " · demo" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="side-link"
+            disabled={busy}
+            onClick={() => replaceWith("/project/new")}
+          >
+            <Plus size={18} />
+            New semester
           </button>
           <div className="saved">
             <span className={`saved-state ${saved ? "is-saved" : ""}`}>
               <i aria-hidden="true" />
-              {saved ? "Saved in this tab" : "In-memory session"}
+              {saved ? "Saved on this device" : "In-memory session"}
             </span>
             <span className="saved-actions">
+              <button
+                className="icon-button theme-toggle"
+                onClick={() => setTheme(theme === "light" ? "dark" : "light")}
+                title={
+                  theme === "light"
+                    ? "Switch to dark theme"
+                    : "Switch to light theme"
+                }
+                aria-label={
+                  theme === "light"
+                    ? "Switch to dark theme"
+                    : "Switch to light theme"
+                }
+              >
+                {theme === "light" ? (
+                  <Moon size={18} aria-hidden="true" />
+                ) : (
+                  <Sun size={18} aria-hidden="true" />
+                )}
+              </button>
               <button
                 className="icon-button"
                 title="Download project backup"
@@ -282,7 +620,7 @@ export default function App() {
           </div>
         </div>
       </aside>
-      <main className="main">
+      <main className="main" id="main-content" tabIndex={-1}>
         <input
           className="sr-only"
           type="file"
@@ -299,45 +637,121 @@ export default function App() {
             }
             if (
               project.assessments.length &&
-              !window.confirm("Replace this tab’s project with the backup?")
+              !window.confirm(
+                "Open this backup? Your other semesters stay saved on this device.",
+              )
             )
               return;
+            setTab("today");
             await act(async () => {
               await validateAndSave(JSON.parse(await file.text()));
-              setTab("overview");
             });
           }}
         />
         <div className="content">
           <header className="page-head">
             <div>
+              <span className="page-eyebrow">
+                {tab === "today"
+                  ? "Today"
+                  : tab === "overview"
+                    ? "Semester overview"
+                    : tab === "assessments"
+                      ? "Assessments"
+                      : tab === "study"
+                        ? "Study plan"
+                        : "Exports & integrations"}
+              </span>
               <h1>
-                {tab === "overview"
-                  ? "See the busy weeks coming."
-                  : tab === "assessments"
-                    ? "The details, sorted."
-                    : tab === "study"
-                      ? "Make the work feel smaller."
-                      : "From a plan to your everyday."}
+                {tab === "today"
+                  ? "Your study day"
+                  : tab === "overview"
+                    ? "Your semester"
+                    : tab === "assessments"
+                      ? "Your assessments"
+                      : tab === "study"
+                        ? "Your study plan"
+                        : "Calendars & backups"}
               </h1>
               <p>
-                {tab === "overview"
-                  ? "Turn scattered deadlines into a semester you can handle."
-                  : "A little clarity now. A lot less scrambling later."}
+                {tab === "today"
+                  ? "See your next task, log progress and adjust around work or training."
+                  : tab === "overview"
+                    ? "Spot deadline clashes and weeks with more work than available time."
+                    : tab === "assessments"
+                      ? "Check deadlines against the source and estimate the work still to do."
+                      : tab === "study"
+                        ? "Sessions fit your available hours. Log or move them when plans change."
+                        : "Take your schedule to your calendar and keep a copy of your semester."}
               </p>
             </div>
-            <button
-              className="button primary"
-              disabled={busy}
-              onClick={() => {
-                setModal("upload");
-                setTab("assessments");
-              }}
-            >
-              <Upload size={18} />
-              Upload handbooks
-            </button>
+            <div className="page-actions">
+              <button
+                className="button secondary"
+                aria-expanded={chatOpen}
+                onClick={() => setChatOpen((value) => !value)}
+              >
+                <MessageCircle size={18} />
+                Planner chat
+              </button>
+              <button
+                className="button secondary library-action"
+                title="Saved semesters"
+                disabled={busy}
+                onClick={() => setModal("library")}
+              >
+                <FolderOpen size={18} aria-hidden="true" />
+                <span className="compact-action-label">Semesters</span>
+              </button>
+              <button
+                className="button primary"
+                disabled={busy}
+                onClick={() => {
+                  setModal("upload");
+                  setTab("assessments");
+                }}
+              >
+                <Upload size={18} />
+                Upload handbooks
+              </button>
+            </div>
           </header>
+          {checkIn?.project_id === project.id && (
+            <SessionCheckIn
+              key={`${project.id}-${checkIn.activity_id}`}
+              project={project}
+              activityId={checkIn.activity_id}
+              close={() => setCheckIn(null)}
+              save={saveCheckIn}
+              busy={busy}
+            />
+          )}
+          {notice && (
+            <div className="notice success" role="status">
+              <span>{notice}</span>
+              <button
+                className="icon-button"
+                aria-label="Dismiss update"
+                onClick={() => setNotice("")}
+              >
+                <X size={16} />
+              </button>
+            </div>
+          )}
+          {recoveryUndo?.project_id === project.id &&
+            JSON.stringify(project.settings) ===
+              JSON.stringify(recoveryUndo.after) && (
+              <div className="notice recovery-undo">
+                <span>Changed your mind about this availability change?</span>
+                <button
+                  className="button secondary small"
+                  disabled={busy}
+                  onClick={undoRecovery}
+                >
+                  Undo availability change
+                </button>
+              </div>
+            )}
           {error && (
             <div className="error global-error" role="alert">
               <span>{error}</span>
@@ -366,20 +780,33 @@ export default function App() {
               </button>
             </div>
           )}
-          {!project.assessments.length && tab === "overview" ? (
+          {!project.assessments.length &&
+          (tab === "overview" || tab === "today") ? (
             <div className="view" key="welcome">
               <section className="welcome" aria-labelledby="welcome-title">
                 <div className="welcome-copy">
                   <h2 id="welcome-title">
-                    Three handbooks.
+                    Your deadlines.
                     <br />
-                    One clear semester.
+                    Your life. One plan.
                   </h2>
                   <p>
-                    Let AI find the deadlines. Check the details. See the crunch
-                    weeks and give your future self a plan.
+                    Start with your free hours, add your assessments, and find
+                    out what fits before the busy weeks arrive.
                   </p>
                   <div className="welcome-actions">
+                    <button
+                      className="button secondary"
+                      disabled={busy}
+                      onClick={() => setModal("settings")}
+                    >
+                      <Settings2 size={18} />
+                      Set my study hours
+                    </button>
+                    <button className="button secondary" onClick={trainingChat}>
+                      <MessageCircle size={18} />
+                      Add training with chat
+                    </button>
                     <button
                       className="button primary"
                       onClick={() => setModal("upload")}
@@ -407,9 +834,15 @@ export default function App() {
               </section>
               <ol className="steps">
                 {[
-                  ["Upload", "Bring your module outlines together."],
-                  ["Review", "Check the dates against the source."],
-                  ["Make a plan", "Find room for work before it piles up."],
+                  ["Make space", "Protect lectures, shifts and days off."],
+                  [
+                    "Add your work",
+                    "Upload a handbook or enter a deadline. Check the source.",
+                  ],
+                  [
+                    "Stay on track",
+                    "See what to do next and recover when plans change.",
+                  ],
                 ].map(([title, copy]) => (
                   <li key={title}>
                     <h3>{title}</h3>
@@ -425,6 +858,52 @@ export default function App() {
                   <span className="spinner" />
                   Updating your plan…
                 </p>
+              )}
+              {tab === "today" && result && (
+                <Today
+                  project={project}
+                  result={result}
+                  busy={busy}
+                  action={handleStudy}
+                  focus={startFocus}
+                  navigate={setTab}
+                  edit={setEditing}
+                  toggleTask={toggleTask}
+                  checkProgress={(activity_id) =>
+                    setCheckIn({ project_id: project.id, activity_id })
+                  }
+                  settings={() => setModal("settings")}
+                  recover={() => setModal("recovery")}
+                  commitments={() => setModal("commitments")}
+                  chat={trainingChat}
+                  refresh={() => {
+                    setRevision((n) => n + 1);
+                    setNotice(
+                      "Your plan is rebuilding around the hours still available.",
+                    );
+                  }}
+                  submit={(item) => {
+                    if (
+                      !window.confirm(
+                        `Mark “${item.title}” submitted? Remaining study sessions for it will be removed.`,
+                      )
+                    )
+                      return;
+                    void act(async () => {
+                      await validateAndSave({
+                        ...project,
+                        assessments: project.assessments.map((row) =>
+                          row.id === item.id
+                            ? { ...row, completed: true }
+                            : row,
+                        ),
+                      });
+                      setNotice(
+                        "Assessment marked submitted. You can reopen it in the assessment editor.",
+                      );
+                    });
+                  }}
+                />
               )}
               {tab === "overview" && result && (
                 <Dashboard
@@ -479,6 +958,10 @@ export default function App() {
                   project={project}
                   result={result}
                   settings={() => setModal("settings")}
+                  recover={() => setModal("recovery")}
+                  action={handleStudy}
+                  focus={startFocus}
+                  busy={busy}
                 />
               )}
               {tab === "notion" && (
@@ -505,11 +988,114 @@ export default function App() {
           </footer>
         </div>
       </main>
+      <FocusDock
+        session={focus}
+        project={project}
+        busy={busy}
+        change={setFocus}
+        complete={finishFocus}
+        openProject={(id) => {
+          const saved = library.find((row) => row.id === id);
+          if (saved)
+            void act(async () => {
+              await validateAndSave(saved);
+              setTab("today");
+            });
+          else
+            setError(
+              "Restore the original semester backup to continue this focus session.",
+            );
+        }}
+      />
+      <ChatPanel
+        key={project.id}
+        project={project}
+        config={config}
+        draft={chatDraft}
+        open={chatOpen}
+        close={() => setChatOpen(false)}
+        apply={applyAssistant}
+        busy={busy}
+      />
+      {modal === "library" && (
+        <Modal title="Your semesters" close={() => setModal(null)} busy={busy}>
+          <p className="muted">
+            Saved in this browser on this device. Download a backup to move to
+            another device or keep a separate copy.
+          </p>
+          <ul className="library-list">
+            {library.map((row) => (
+              <li key={row.id}>
+                <button
+                  className="library-open"
+                  disabled={busy}
+                  onClick={() =>
+                    void act(async () => {
+                      await validateAndSave(row);
+                      setModal(null);
+                      setTab("today");
+                      setNotice("");
+                    })
+                  }
+                >
+                  <strong>
+                    {row.name}
+                    {row.demo ? " · demo" : ""}
+                  </strong>
+                  <small>
+                    {dateLabel(row.settings.semester_start)} –{" "}
+                    {dateLabel(row.settings.semester_end)} ·{" "}
+                    {row.assessments.length} assessments
+                  </small>
+                  {row.id === project.id && <span className="chip">Open</span>}
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label={`Download backup of ${row.name}`}
+                  onClick={() =>
+                    saveBlob(
+                      new Blob([JSON.stringify(row, null, 2)], {
+                        type: "application/json",
+                      }),
+                      "crunch-week-project.json",
+                    )
+                  }
+                >
+                  <Download size={18} />
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="modal-actions">
+            <button
+              className="button primary"
+              disabled={busy}
+              onClick={() =>
+                void act(async () => {
+                  persist(await request<Project>("/project/new"));
+                  setModal(null);
+                  setTab("today");
+                })
+              }
+            >
+              <Plus size={18} />
+              New semester
+            </button>
+          </div>
+        </Modal>
+      )}
       {modal === "settings" && (
         <SettingsEditor
           project={project}
           close={() => setModal(null)}
-          save={validateAndSave}
+          save={async (next) => {
+            const current = projectRef.current ?? next;
+            await validateAndSave({
+              ...current,
+              name: next.name,
+              settings: next.settings,
+            });
+          }}
         />
       )}
       {modal === "upload" && (
@@ -521,11 +1107,47 @@ export default function App() {
             if (projectRef.current?.assessments.length) setTab("assessments");
           }}
           save={persist}
+          addManually={() => {
+            setModal(null);
+            setTab("assessments");
+            newAssessment();
+          }}
+        />
+      )}
+      {modal === "commitments" && (
+        <CommitmentsDialog
+          project={project}
+          close={() => setModal(null)}
+          save={async (next) => {
+            const current = projectRef.current ?? next;
+            await validateAndSave({ ...current, settings: next.settings });
+            setNotice(
+              "Commitments saved. Your study plan is adjusting around them.",
+            );
+          }}
+        />
+      )}
+      {modal === "recovery" && (
+        <RecoveryDialog
+          project={project}
+          close={() => setModal(null)}
+          apply={applyRecovery}
+          settings={() => setModal("settings")}
+          review={() => {
+            setModal(null);
+            setTab("assessments");
+          }}
         />
       )}
       {editing && (
         <AssessmentEditor
           item={editing}
+          projects={[
+            ...library.filter((row) => row.id !== project.id),
+            project,
+          ]}
+          projectId={project.id}
+          alreadyLogged={loggedMinutes(project, editing)}
           close={() => setEditing(null)}
           save={async (item) => {
             const current = projectRef.current ?? project;

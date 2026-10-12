@@ -1,7 +1,9 @@
 import type { CSSProperties } from "react";
 import { Hourglass, Settings2, TriangleAlert } from "lucide-react";
-import type { PlanResponse, Project, StudyBlock } from "../types";
+import type { PlanResponse, Project, StudyAction, StudyBlock } from "../types";
 import { dateLabel, daysBetween, moduleColor } from "../utils";
+
+import { StudyActions } from "./StudyActions";
 
 const weekday = new Intl.DateTimeFormat("en-IE", {
   weekday: "short",
@@ -12,10 +14,18 @@ export function StudyPlan({
   project,
   result,
   settings,
+  recover,
+  action,
+  busy,
+  focus,
 }: {
   project: Project;
   result: PlanResponse;
   settings: () => void;
+  recover: () => void;
+  action: (action: StudyAction, id: string) => void;
+  busy: boolean;
+  focus: (block: StudyBlock) => void;
 }) {
   const groups = result.plan.blocks.reduce<Record<string, StudyBlock[]>>(
     (all, block) => {
@@ -42,21 +52,38 @@ export function StudyPlan({
           <div>
             <h2 id="plan-title">A plan that fits your week.</h2>
             <p>
-              {project.settings.daily_minutes / 60} hours per available day · up
-              to {project.settings.block_minutes} minutes per block ·{" "}
+              {project.settings.weekly_windows.length
+                ? `${project.settings.weekly_windows.reduce((sum, row) => sum + row.minutes, 0) / 60} ${project.settings.weekly_windows.reduce((sum, row) => sum + row.minutes, 0) === 60 ? "hour" : "hours"} across your custom week`
+                : `${project.settings.daily_minutes / 60} hours per available day`}{" "}
+              before protected commitments ·{" "}
+              {project.settings.extra_windows.length} one-off study window(s) ·
+              up to {project.settings.block_minutes} minutes per block ·{" "}
               {project.settings.timezone}
             </p>
           </div>
-          <button className="button secondary" onClick={settings}>
-            <Settings2 size={18} />
-            Availability
-          </button>
+          <div className="plan-buttons">
+            <button
+              className="button secondary"
+              disabled={busy}
+              onClick={recover}
+            >
+              Make room
+            </button>
+            <button className="button secondary" onClick={settings}>
+              <Settings2 size={18} />
+              Availability
+            </button>
+          </div>
         </div>
         <p className="plan-note">
-          Earlier deadlines get priority. Work is placed as late as it fits
-          before deadline day, with {project.settings.buffer_days} extra clear
-          day(s). Reduce “work left” as you finish; this is a suggested plan,
-          not a live timetable.
+          Lectures and shifts are protected; overlapping study windows count
+          once. Earlier deadlines get priority.{" "}
+          {project.settings.planning_style === "steady"
+            ? "Sessions are spread across available days so you can start early."
+            : "Work is placed near each deadline."}{" "}
+          Study finishes before deadline day, with{" "}
+          {project.settings.buffer_days} extra clear day(s). Log completed
+          sessions to reduce remaining work; move a session to replan it.
         </p>
       </section>
       {result.plan.shortfalls.length > 0 && (
@@ -158,6 +185,12 @@ export function StudyPlan({
                               />
                               {block.module}
                             </small>
+                            <StudyActions
+                              block={block}
+                              busy={busy}
+                              action={action}
+                              focus={focus}
+                            />
                           </li>
                         ))}
                       </ul>

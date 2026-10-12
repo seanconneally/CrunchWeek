@@ -200,3 +200,17 @@ def test_missing_azure_configuration_never_falls_back(client, monkeypatch, proje
     assert response.status_code == 400
     assert "AZURE_OPENAI_API_KEY" in response.json()["detail"]
     assert "private-public-test-key" not in response.text
+
+
+
+def test_availability_confirmation_roundtrip_and_older_backups(client):
+    data = client.get("/api/project/new").json()
+    assert data["settings"]["availability_confirmed"] is False
+    del data["settings"]["availability_confirmed"]
+    restored = client.post("/api/project/validate", json=data)
+    assert restored.status_code == 200
+    assert restored.json()["settings"]["availability_confirmed"] is False
+    data["settings"]["availability_confirmed"] = True
+    confirmed = client.post("/api/project/validate", json=data)
+    assert confirmed.status_code == 200
+    assert confirmed.json()["settings"]["availability_confirmed"] is True

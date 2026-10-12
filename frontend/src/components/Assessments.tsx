@@ -30,13 +30,33 @@ export function Assessments({
 }) {
   const [search, setSearch] = useState("");
   const [onlyUnreviewed, setOnlyUnreviewed] = useState(false);
-  const items = project.assessments.filter(
-    (item) =>
-      `${item.title} ${item.module}`
-        .toLowerCase()
-        .includes(search.toLowerCase()) &&
-      (!onlyUnreviewed || !item.reviewed),
-  );
+  const [status, setStatus] = useState("all");
+  const [order, setOrder] = useState("deadline");
+  const items = project.assessments
+    .filter(
+      (item) =>
+        `${item.title} ${item.module}`
+          .toLowerCase()
+          .includes(search.trim().toLowerCase()) &&
+        (!onlyUnreviewed || !item.reviewed) &&
+        (status === "all" ||
+          (status === "submitted" ? item.completed : !item.completed)),
+    )
+    .sort((a, b) =>
+      order === "module"
+        ? a.module.localeCompare(b.module) || a.title.localeCompare(b.title)
+        : order === "title"
+          ? a.title.localeCompare(b.title)
+          : (a.due_date || "9999").localeCompare(b.due_date || "9999") ||
+            a.title.localeCompare(b.title),
+    );
+  const filtered =
+    search.trim().length > 0 || onlyUnreviewed || status !== "all";
+  const clearFilters = () => {
+    setSearch("");
+    setOnlyUnreviewed(false);
+    setStatus("all");
+  };
   const total = project.assessments.length;
   const reviewed = project.assessments.filter((item) => item.reviewed).length;
   return (
@@ -83,6 +103,30 @@ export function Assessments({
             onChange={(e) => setSearch(e.target.value)}
           />
         </label>
+        <label className="sr-only" htmlFor="status-filter">
+          Assessment status
+        </label>
+        <select
+          id="status-filter"
+          value={status}
+          onChange={(e) => setStatus(e.target.value)}
+        >
+          <option value="all">All assessments</option>
+          <option value="active">Active</option>
+          <option value="submitted">Submitted</option>
+        </select>
+        <label className="sr-only" htmlFor="assessment-order">
+          Sort assessments
+        </label>
+        <select
+          id="assessment-order"
+          value={order}
+          onChange={(e) => setOrder(e.target.value)}
+        >
+          <option value="deadline">Nearest deadline</option>
+          <option value="module">Module</option>
+          <option value="title">Name</option>
+        </select>
         <label className="check-row">
           <input
             type="checkbox"
@@ -91,6 +135,17 @@ export function Assessments({
           />
           Needs review only
         </label>
+      </div>
+      <div className="filter-summary" role="status">
+        <span>
+          {items.length} of {total} assessments
+          {filtered ? " match your filters" : " shown"}
+        </span>
+        {filtered && (
+          <button className="text-link" onClick={clearFilters}>
+            Clear filters
+          </button>
+        )}
       </div>
       <div className="table-wrap">
         <table className="assessment-table">
@@ -116,6 +171,9 @@ export function Assessments({
                   <button className="table-title" onClick={() => edit(item)}>
                     {item.title}
                   </button>
+                  {item.completed && (
+                    <span className="chip inked">Submitted</span>
+                  )}
                   <span className="module-label">
                     <i
                       className="dot"
@@ -149,7 +207,7 @@ export function Assessments({
                   <span className="cell-label" aria-hidden="true">
                     Work left
                   </span>
-                  {item.effort_minutes / 60}h
+                  {item.completed ? "Finished" : `${item.effort_minutes / 60}h`}
                 </td>
                 <td className="cell-review">
                   <span
@@ -187,9 +245,23 @@ export function Assessments({
         </table>
       </div>
       {!items.length && (
-        <p className="empty-small">
-          No assessments match. Upload a handbook or add one manually.
-        </p>
+        <div className="empty-small assessment-empty">
+          <FileSearch size={28} aria-hidden="true" />
+          <h3>
+            {total ? "No matching assessments" : "Your deadlines start here"}
+          </h3>
+          <p>
+            {total
+              ? "Try a different search or clear the filters to see all your work."
+              : "Upload a handbook or add your first assessment to build your plan."}
+          </p>
+          <button
+            className="button secondary"
+            onClick={total ? clearFilters : add}
+          >
+            {total ? "Show all assessments" : "Add your first assessment"}
+          </button>
+        </div>
       )}
       {project.assessments.some((item) => !item.reviewed) && (
         <div className="bulk-review">

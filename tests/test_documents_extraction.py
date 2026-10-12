@@ -251,7 +251,7 @@ def test_zip_reads_supported_files_and_skips_junk():
         }
     )
     document = read_document("moodle.zip", data)
-    assert document.pages == ("[FILE outline.txt]\nEssay due 2026-11-03", "[FILE table.csv]\nQuiz,10%\n")
+    assert document.pages == ("[FILE Week 1/outline.txt]\nEssay due 2026-11-03", "[FILE Week 1/table.csv]\nQuiz,10%\n")
 
 
 def test_html_drops_scripts_and_keeps_table_cells():

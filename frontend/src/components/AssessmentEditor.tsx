@@ -1,22 +1,43 @@
 import { useState } from "react";
 import { CalendarX2, FileText } from "lucide-react";
 import type { Assessment, AssessmentKind } from "../types";
+import { estimateSuggestion } from "../estimates";
+import type { Project } from "../types";
+import { ChecklistEditor } from "./ChecklistEditor";
 import { Modal } from "./Modal";
 
 export function AssessmentEditor({
   item,
   close,
   save,
+  projects,
+  projectId,
+  alreadyLogged,
 }: {
   item: Assessment;
   close: () => void;
   save: (item: Assessment) => Promise<void>;
+  projects: Project[];
+  projectId: string;
+  alreadyLogged: number;
 }) {
   const [draft, setDraft] = useState(item);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const suggestion = estimateSuggestion(
+    projects,
+    draft.kind,
+    draft.module,
+    projectId,
+    draft.id,
+  );
   const change = (patch: Partial<Assessment>) =>
-    setDraft((old) => ({ ...old, ...patch, reviewed: false }));
+    setDraft((old) => ({
+      ...old,
+      ...patch,
+      reviewed:
+        "effort_minutes" in patch || "notes" in patch ? old.reviewed : false,
+    }));
   return (
     <Modal
       title={item.title ? "Review assessment" : "Add an assessment"}
@@ -152,10 +173,46 @@ export function AssessmentEditor({
               }
             />
             <small>
-              Your estimate, not an AI prediction. Set to 0 when the work is
-              finished.
+              Your estimate, not an AI prediction. Completing study sessions
+              reduces this automatically. Mark submitted when the assessment is
+              handed in.
             </small>
           </label>
+          {suggestion && !draft.completed && (
+            <div className="estimate-suggestion span-two">
+              <strong>
+                Your logged work suggests {suggestion.minutes / 60} h total.
+              </strong>
+              <p>
+                Median of {suggestion.samples} completed{" "}
+                {draft.kind.toLowerCase()} assessments
+                {suggestion.sameModule
+                  ? " in this module"
+                  : " across your modules"}
+                . {alreadyLogged / 60} hours already logged here; suggested
+                remaining work:{" "}
+                {Math.max(0, suggestion.minutes - alreadyLogged) / 60} hours.
+              </p>
+              <button
+                type="button"
+                className="button secondary small"
+                onClick={() =>
+                  change({
+                    effort_minutes: Math.max(
+                      0,
+                      suggestion.minutes - alreadyLogged,
+                    ),
+                  })
+                }
+              >
+                Use suggested remaining hours
+              </button>
+              <small>
+                Based on recorded study, which may omit unlogged work. You can
+                edit the estimate.
+              </small>
+            </div>
+          )}
           <label className="field span-two">
             Notes
             <textarea
@@ -166,6 +223,20 @@ export function AssessmentEditor({
             />
           </label>
         </div>
+        <ChecklistEditor
+          tasks={draft.tasks}
+          change={(tasks) => setDraft((old) => ({ ...old, tasks }))}
+        />
+        <label className="check-row">
+          <input
+            type="checkbox"
+            checked={draft.completed}
+            onChange={(e) =>
+              setDraft((old) => ({ ...old, completed: e.target.checked }))
+            }
+          />
+          Submitted / finished assessment
+        </label>
         <label className={`confirm ${draft.reviewed ? "is-inked" : ""}`}>
           <input
             type="checkbox"
